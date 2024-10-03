@@ -3,7 +3,7 @@ Name: Kavin Janarthanan
 Partner: Cumhur Aygar
 
 Project: Phase 1A
-
+Description: Implementation of certain functions concerning 'Process Control' mechanism of OS kernel.
 Course: CSC 452
 
 
@@ -34,6 +34,7 @@ Process processTable[MAXPROC];
 int nextPID = 2;                
 int currPID = 1;                
 
+// Helper function to check if we're in kernel mode
 void check_kernel_mode() {
     int psr = USLOSS_PsrGet();
     if (!(psr & USLOSS_PSR_CURRENT_MODE)) {  // If not in kernel mode
@@ -189,14 +190,17 @@ void quit(int status) {
     USLOSS_Halt(1); 
 }
 
+// Returns current process ID
 int getpid(void) {
     return currPID;
 }
 
+// Returns next process ID
 int getNextpid(void) {
     return nextPID;
 }
 
+// Join process for parent process to wait for child process to complete, similar to WAIT() function in UNIX systems
 int join(int *status) {
     check_kernel_mode();
 
@@ -235,7 +239,7 @@ int join(int *status) {
     return childPid;
 }
 
-
+// Dump all processes
 void dumpProcesses(void) {
     printf("PID\tName\t\tPriority\tStatus\tActive\n");
     for (int i = 0; i < MAXPROC; i++) {
