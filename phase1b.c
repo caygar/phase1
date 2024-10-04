@@ -395,56 +395,42 @@ void printProcess(int pid) {
 
 
 void dispatcher() {
-    check_kernel_mode();  
+    check_kernel_mode();
     unsigned int old_psr = disableInterruptsCustom();
 
     int startTime = currentTime();
-
     dumpProcesses();
 
     Process *nextProcess = findNextProcess();
-    USLOSS_Console("Entering dispatcher: current pid is %d and the next process pid is %d\n", getpid(), nextProcess->pid);
+    USLOSS_Console("Entering dispatcher: current pid is %d and the next process pid is %d\n", getpid(), nextProcess ? nextProcess->pid : -1);
 
     if (nextProcess == NULL) {
         USLOSS_Console("No runnable process found.\n");
-        USLOSS_Halt(1);  
+        USLOSS_Halt(1);
     }
 
     if (nextProcess->hasQuit) {
         USLOSS_Console("ERROR: Attempted to switch to a process that has quit. PID: %d\n", nextProcess->pid);
-        USLOSS_Halt(1); 
-    }
-
-    if (nextProcess->pid == 1) {
-        currPID = nextProcess->pid;
-        USLOSS_ContextSwitch(NULL, &(nextProcess->context));
-
-        startTime = currentTime();
-        restoreInterruptsCustom(old_psr);
-        return;
+        USLOSS_Halt(1);
     }
 
     if (nextProcess->pid != currPID) {
         Process *currentProcess = &processTable[currPID - 1];
-        Process *previousProcess = currentProcess;
-        currPID = nextProcess->pid;  
+        currPID = nextProcess->pid;
 
-        int currentTimeValue = currentTime();
-        if (previousProcess->isActive && (currentTimeValue - startTime >= TIME_SLICE)) {
-            USLOSS_Console("Enqueuing process PID %d after timeslice\n", previousProcess->pid);
-            enqueue(previousProcess);  
+        if (currentProcess->isActive && !currentProcess->hasQuit && !currentProcess->isBlocked) {
+            USLOSS_Console("Re-enqueuing process PID %d before switching\n", currentProcess->pid);
+            enqueue(currentProcess);  
         }
 
-        USLOSS_Console("Context switching from PID %d to PID %d\n", previousProcess->pid, nextProcess->pid);
-        USLOSS_ContextSwitch(&(previousProcess->context), &(nextProcess->context));
-
-        startTime = currentTime();
-    } else {
+        USLOSS_Console("Context switching from PID %d to PID %d\n", currentProcess->pid, nextProcess->pid);
+        USLOSS_ContextSwitch(&(currentProcess->context), &(nextProcess->context));
         startTime = currentTime();
     }
 
     restoreInterruptsCustom(old_psr);
 }
+
 
 
 
