@@ -10,6 +10,7 @@ void sporkWrapper(void *arg);
 unsigned int disableInterruptsCustom(void);
 void restoreInterruptsCustom(unsigned int old_psr);
 
+
 typedef struct Process {
     int pid;
     char name[MAXNAME];
@@ -37,6 +38,8 @@ typedef struct ProcessQueue {
 ProcessQueue readyQueue[6];  
 
 char initStack[USLOSS_MIN_STACK * 2];
+
+int initProc = 1;
 
 Process processTable[MAXPROC];
 int nextPID = 2;
@@ -142,12 +145,6 @@ int spork(char *name, int (*func)(void *), void *arg, int stacksize, int priorit
 
     enqueue(&processTable[slot]);  
 
-    if (USLOSS_PsrSet(old_psr) != USLOSS_DEV_OK) {
-        USLOSS_Console("ERROR: Failed to restore PSR in spork()\n");
-        USLOSS_Halt(1);
-    }
-    USLOSS_Console("-----Spork Ended-----\n");
-
     dispatcher();
     restoreInterruptsCustom(old_psr);
     return processTable[slot].pid;
@@ -161,16 +158,20 @@ void sporkWrapper(void *arg) {
     void *funcArg = processTable[slot].arg;
 
     int status = func(funcArg);
-    if (currPID != 1) {
-        quit(status);
+    if (currPID == 1) {
+        
+        return; 
     } else {
-        USLOSS_Halt(0);  
+        printProcess(currPID);
+        quit(status);
     }
 }
 
 int join(int *status) {
     check_kernel_mode();  
     unsigned int old_psr = disableInterruptsCustom();
+
+    //USLOSS_Console("ENTERING JOIN WITH PID: %d\n", currPID);
 
     if (status == NULL) {
         restoreInterruptsCustom(old_psr);
@@ -208,43 +209,42 @@ int join(int *status) {
 
 void quit(int status) {
     unsigned int old_psr = disableInterruptsCustom();
-    check_kernel_mode();  
-    USLOSS_Console("Entering quit\n");
-    dumpProcesses();
-    
+    check_kernel_mode();  // Ensure kernel mode
+    USLOSS_Console("Entering quit with PID: %d\n", currPID);
+
     Process *current = &processTable[currPID - 1];
+    USLOSS_Console("PROCESS BEFORE QUIT\n");
     printProcess(current->pid);
 
-    if (current->firstChild != NULL) {
-        Process *child = current->firstChild;
-        while (child != NULL) {
-            if (!child->hasQuit) {
-                USLOSS_Console("ERROR: Process %d has unjoined children. Cannot quit.\n", current->pid);
-                USLOSS_Halt(1);  
-            }
-            child = child->nextSibling;
+    // Check if the current process has any active (running) children
+    Process *child = current->firstChild;
+
+    while (child != NULL) {
+        // Check if the child is still active and hasn't quit
+        if (child->isActive && !child->hasQuit) {
+            USLOSS_Console("ERROR: Process %d has active children. Cannot quit.\n", current->pid);
+            USLOSS_Halt(1);  // Halt the simulation with error
         }
+        child = child->nextSibling;  // Move to the next sibling
     }
 
+    // Mark current process as having quit
     current->hasQuit = 1;
     current->quitStatus = status;
     current->isActive = 0;
 
-    int parentPID = current->ppid;
-    if (parentPID != -1) {
-        Process *parent = &processTable[parentPID - 1];
-        if (parent->isActive == 0) {
-            parent->isActive = 1; 
-        }
-    }
+    // No need to remove the child from the parent's child list
+    USLOSS_Console("Process After Quit\n");
+    printProcess(current -> pid);
+    USLOSS_Console("Leaving quit with PID: %d\n", currPID);
+    dumpProcesses();
 
-
-    USLOSS_Console("Leaving quit\n");
-
-    dispatcher();
+    dispatcher();  // Switch to another process
 
     restoreInterruptsCustom(old_psr);
 }
+
+
 
 
 void zap(int pid) {
@@ -322,7 +322,6 @@ void enqueue(Process *proc) {
     }
     readyQueue[priority].tail = proc;
     proc->nextSibling = NULL;
-    printReadyQueue();
 }
 
 
@@ -363,11 +362,112 @@ void printReadyQueue() {
 Process *findNextProcess() {
     for (int i = 0; i < 6; i++) {
         if (readyQueue[i].head != NULL) {
+            USLOSS_Console("REMOVING PRIORIITY LEVEL: %d\n", i + 1);
             return dequeue(i + 1);
         }
     }
     return NULL;
 }
+
+
+Process *findNextNonRunningProcess() {
+    for (int i = 0; i < 6; i++) {  // Loop through priority levels from high to low
+        Process *current = readyQueue[i].head;
+        while (current != NULL) {
+            if (!current->isActive && !current->hasQuit && !current->isBlocked) {
+                return current;  // Found a process that is not running, not blocked, not quit
+            }
+            current = current->nextSibling;
+        }
+    }
+    return NULL;
+}
+
+Process *findNextRunningProcess() {
+    for (int i = 0; i < 6; i++) {  // Loop through priority levels from high to low
+        Process *current = readyQueue[i].head;
+        while (current != NULL) {
+            if (current->isActive && !current->hasQuit) {
+                return current;  // Found a running process that is not quit
+            }
+            current = current->nextSibling;
+        }
+    }
+    return NULL;
+}
+
+void dispatcher() {
+    check_kernel_mode();  // Ensure we're in kernel mode
+    unsigned int old_psr = disableInterruptsCustom();
+
+    static int lastSwitchTime = 0;  // Tracks the last context switch time
+    int currentTimeValue = currentTime();
+
+    // Get the current system time before switching processes
+    //printReadyQueue();
+    //dumpProcesses();
+
+    if (initProc == 1) {
+        initProc = 0;
+        currPID = 1;
+        USLOSS_ContextSwitch(NULL, &(processTable[0].context));
+        lastSwitchTime = currentTime();
+        restoreInterruptsCustom(old_psr);
+        return;
+    }
+
+    Process *nextProcess = findNextNonRunningProcess();
+    if (nextProcess == NULL) {
+        USLOSS_Console("No non-running process found, looking for running process.\n");
+        nextProcess = findNextRunningProcess();  // This function now checks for running processes
+    }
+
+    // If no process is found, halt the system (shouldn't happen)
+    if (nextProcess == NULL) {
+        USLOSS_Console("No runnable process found at any priority.\n");
+        USLOSS_Halt(1);
+    }
+
+    Process *currentProcess = &processTable[currPID - 1];
+
+    // If current process and next process are at the same priority level, implement time-slicing
+    if (currentProcess->priority == nextProcess->priority) {
+        int timeElapsed = currentTimeValue - lastSwitchTime;
+
+        // Check if the current process has used up its time slice
+        if (timeElapsed >= TIME_SLICE) {
+            USLOSS_Console("Time slice expired for PID: %d. Requeuing.\n", currentProcess->pid);
+            enqueue(currentProcess);  // Requeue the current process without dequeuing
+            nextProcess = findNextNonRunningProcess();
+            if (nextProcess == NULL) {
+                nextProcess = findNextRunningProcess();  // Find another running process if no non-running ones
+            }
+        }
+    }
+
+    // Perform context switch only if next process is not the current one
+    if (nextProcess->pid != currPID) {
+        Process *previousProcess = currentProcess;
+        currPID = nextProcess->pid;  // Set the current running process to the new one
+
+        // Perform the context switch between processes
+        USLOSS_Console("Context switching from PID %d to PID %d\n", previousProcess->pid, nextProcess->pid);
+        USLOSS_ContextSwitch(&(previousProcess->context), &(nextProcess->context));
+
+        // Update the last switch time after the context switch
+        lastSwitchTime = currentTime();
+    }
+
+    restoreInterruptsCustom(old_psr);
+}
+
+
+
+
+
+
+
+
 
 void printProcess(int pid) {
     if (pid < 1 || pid >= MAXPROC || processTable[pid - 1].pid == -1) {
@@ -392,47 +492,6 @@ void printProcess(int pid) {
     USLOSS_Console("Start Function Pointer: %p\n", proc->startFunc);
     USLOSS_Console("-----------------------------\n");
 }
-
-
-void dispatcher() {
-    check_kernel_mode();
-    unsigned int old_psr = disableInterruptsCustom();
-
-    int startTime = currentTime();
-    dumpProcesses();
-
-    Process *nextProcess = findNextProcess();
-    USLOSS_Console("Entering dispatcher: current pid is %d and the next process pid is %d\n", getpid(), nextProcess ? nextProcess->pid : -1);
-
-    if (nextProcess == NULL) {
-        USLOSS_Console("No runnable process found.\n");
-        USLOSS_Halt(1);
-    }
-
-    if (nextProcess->hasQuit) {
-        USLOSS_Console("ERROR: Attempted to switch to a process that has quit. PID: %d\n", nextProcess->pid);
-        USLOSS_Halt(1);
-    }
-
-    if (nextProcess->pid != currPID) {
-        Process *currentProcess = &processTable[currPID - 1];
-        currPID = nextProcess->pid;
-
-        if (currentProcess->isActive && !currentProcess->hasQuit && !currentProcess->isBlocked) {
-            USLOSS_Console("Re-enqueuing process PID %d before switching\n", currentProcess->pid);
-            enqueue(currentProcess);  
-        }
-
-        USLOSS_Console("Context switching from PID %d to PID %d\n", currentProcess->pid, nextProcess->pid);
-        USLOSS_ContextSwitch(&(currentProcess->context), &(nextProcess->context));
-        startTime = currentTime();
-    }
-
-    restoreInterruptsCustom(old_psr);
-}
-
-
-
 
 
 
