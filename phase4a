@@ -1,0 +1,268 @@
+// Cumhur Aygar, Kavin
+
+#include <phase1.h>
+#include <phase2.h>
+#include <phase3.h>
+#include <phase4.h>
+#include <phase4_usermode.h>
+#include <usloss.h>
+#include <usyscall.h>
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
+
+#define FREE 0
+#define ASLEEP 1
+#define AWAKE 2
+
+// CLOCK DEVICE
+// Struct to store sleep requests
+typedef struct SleepRequest SleepRequest; 
+typedef struct SleepRequest {
+    int seconds;
+    int mbox; 
+    int status;
+    SleepRequest* next;
+};
+
+SleepRequest* sleepRequestQueue; // Queue of sleep requests
+SleepRequest sleepRequestsTable[MAXPROC]; // Table of sleep requests
+
+// Sleep request functions
+void sleep(USLOSS_Sysargs *args);
+int sleepMain(char *args);
+
+// TERMINAL DEVICE
+// arrays to store terminal information
+int termWriteMutex[USLOSS_TERM_UNITS];
+int termToWrite[USLOSS_TERM_UNITS];
+int termReadMbox[USLOSS_TERM_UNITS];
+int termLineIndex[USLOSS_TERM_UNITS];
+char termLines[USLOSS_TERM_UNITS][MAXLINE+1];
+
+// Terminal request functions
+void termWrite(USLOSS_Sysargs *args);
+void termRead(USLOSS_Sysargs *args);
+int termMain(char *args);
+
+/**
+ * @brief Initializes the phase 4 system calls, sleep and 
+ * termRead/termWrite for clock and terminal devices.
+ */
+void phase4_init(void) {
+    // Initialize system call vector
+    systemCallVec[SYS_SLEEP] = sleep;
+    systemCallVec[SYS_TERMREAD]  = termRead;
+    systemCallVec[SYS_TERMWRITE] = termWrite;
+
+    // Initialize sleep request table
+    for (int i = 0; i < MAXPROC; i++) {
+        sleepRequestsTable[i].status = FREE;
+        sleepRequestsTable[i].next = NULL;
+        sleepRequestsTable[i].mbox = -1;
+    }
+    sleepRequestQueue = NULL;
+
+    // Initialize terminal arrays
+    memset(termLines, '\0', sizeof(termLines));
+    memset(termLineIndex, 0, sizeof(termLineIndex));
+    for (int i = 0; i < USLOSS_TERM_UNITS; i++) {
+        USLOSS_DeviceOutput(USLOSS_TERM_DEV, i, (void*)(long)0x2);
+        termReadMbox[i] = MboxCreate(10, MAXLINE);
+        termToWrite[i] = MboxCreate(1, 0);
+        termWriteMutex[i] = MboxCreate(1, 0);
+    }
+}
+
+/**
+ * @brief Starts the deamons for phase 4 by spawning the sleepMain and termMain processes.
+ */
+void phase4_start_service_processes(void){
+    // Start the clock deamon
+    int sleepServicePid = spork("sleepMain", sleepMain, NULL, USLOSS_MIN_STACK, 2);
+
+    // Start the terminal deamons
+    for (int i = 0; i < USLOSS_TERM_UNITS; i++) {
+        char name[128];
+        sprintf(name, "termMain%d", i);
+        char unit[10];
+        sprintf(unit, "%d", i);
+        int termPID = spork(name, termMain, unit, USLOSS_MIN_STACK, 2);
+    }
+}
+
+/**
+ * @brief System call for sleeping for a given number of seconds.
+ * 
+ * @param args: The arguments sent to the sleep system call. 
+ *              Specifically, the number of seconds to sleep.
+ */
+void sleep(USLOSS_Sysargs *args) {
+    // Get the number of seconds to sleep
+    int seconds = (long) args->arg1;
+    
+    // Check if the number of seconds is valid
+    if (seconds < 0) {
+        args->arg4 = (void *) -1;
+        return;
+    }
+
+    // Find a free slot in the sleep request table
+    int sleepIndex = -1;
+    for (int i = 0; i < MAXPROC; i++) {
+        if (sleepRequestsTable[i].status == FREE) {
+            sleepIndex = i;
+            break;
+        }
+    }
+
+    // Fill the sleep request table
+    SleepRequest* request = &sleepRequestsTable[sleepIndex];
+    request->seconds = currentTime() + seconds * 1000000;
+    request->mbox = MboxCreate(1, 0);
+    request->status = ASLEEP;
+    
+    // Add the request to the sleep request queue
+    SleepRequest* rest = sleepRequestQueue;
+    request->next = rest; 
+    sleepRequestQueue = request; 
+    
+    MboxRecv(request->mbox, NULL, 0);
+
+    args->arg4 = (void *) 0;
+}
+
+/**
+ * @brief The main function for the sleep system call. 
+ * It checks the sleep request queue and wakes up the processes that are asleep
+ * if their sleep time has passed.
+ * 
+ * @param args: The arguments for the sleep system call.
+ * @return int: 0 when the process is done.
+ */
+int sleepMain(char* args) {
+    int status;
+    while(1){
+        waitDevice(USLOSS_CLOCK_DEV, 0, &status);
+        SleepRequest* cur = sleepRequestQueue;
+        // Iterate through the sleep request queue
+        while (cur != NULL) {
+            // Check if the process is asleep and if it is time to wake up
+            if (cur->status == ASLEEP && currentTime() > cur->seconds){
+                cur->status = AWAKE;
+                MboxSend(cur->mbox, NULL, 0);
+            }
+            cur = cur->next;
+        }
+    }
+    return 0;
+}
+
+/**
+ * @brief System call for writing characters of a given buffer to a terminal.
+ * The writing operation is done character by character, and each operation
+ * is atomic.
+ * 
+ * @param args: The arguments for the TermWrite system call.
+ */
+void termWrite(USLOSS_Sysargs *args) {
+    // TODO
+}
+
+/**
+ * @brief System call for reading characters from a terminal.
+ * 
+ * 
+ * @param args: The arguments for the TermRead system call.
+ */
+void termRead(USLOSS_Sysargs *args) {
+    char *buffer = (char *) args->arg1;
+    int bufferSize = (int) args->arg2;
+    int unit = (int) args->arg3;
+
+    if (buffer == NULL || bufferSize <= 0 || unit < 0 || unit >= USLOSS_TERM_UNITS) {
+        args->arg4 = (void *) -1;
+        return;
+    }
+
+    char line[MAXLINE+1];
+
+    // wait for a line to be read
+    int len = MboxRecv(termReadMbox[unit], &line, MAXLINE+1);
+
+    if (len > bufferSize) {
+        len = bufferSize;
+    }
+
+    strncpy(buffer, line, len);
+
+    args->arg4 = (void *) 0;
+    args->arg2 = (void *) len;
+}
+
+
+/**
+ * @brief The main function for the terminal system calls.
+ * 
+ * @param args: The terminal unit number as a string.
+ * @return int 
+ */
+int termMain(char *args) {
+    int status;
+
+    int unit = atoi(args);
+
+    while(1) {
+        // wait for terminal unit to be ready
+        waitDevice(USLOSS_TERM_DEV, unit, &status);
+
+        int recv = USLOSS_TERM_STAT_RECV(status);
+        int xmit = USLOSS_TERM_STAT_XMIT(status);
+
+        if (xmit == USLOSS_DEV_READY ) {
+            // signal that the terminal is ready
+            MboxCondSend(termToWrite[unit], NULL, 0);
+        } else if (xmit == USLOSS_DEV_ERROR) {
+            USLOSS_Console("USLOSS_DEV_ERROR. Halting...\n");
+            USLOSS_Halt(1);
+        }
+
+        if (recv == USLOSS_DEV_BUSY) {
+            // read the character
+            char character = USLOSS_TERM_STAT_CHAR(status);
+            
+            if (termLineIndex[unit] < MAXLINE) {
+                termLines[unit][termLineIndex[unit]] = character;
+                termLineIndex[unit]++;
+            }
+            // check if the character is a newline
+            if (character == '\n') {
+                // send the line to the mailbox
+                MboxCondSend(termReadMbox[unit], termLines[unit], termLineIndex[unit]);
+                memset(termLines[unit], '\0', sizeof(termLines[unit]));
+                termLineIndex[unit] = 0;
+            }
+
+            // check if the line is full, if so add character to new line after sending the current line
+            if (termLineIndex[unit] == MAXLINE) {
+                MboxCondSend(termReadMbox[unit], termLines[unit], termLineIndex[unit]);
+                memset(termLines[unit], '\0', sizeof(termLines[unit]));
+                termLineIndex[unit] = 0;
+
+                termLines[unit][termLineIndex[unit]] = character;
+                termLineIndex[unit]++;
+            }
+
+
+
+
+        } else if (recv == USLOSS_DEV_ERROR) {
+            USLOSS_Console("An error occurred on unit %d\n", unit);
+            USLOSS_Halt(1);
+        }
+
+    }
+
+    return 0;
+}
+
