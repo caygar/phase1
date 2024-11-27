@@ -1,4 +1,10 @@
-// Cumhur Aygar, Kavin
+/**
+ * Contributors: Kavin, Cumhur Aygar
+ * Course: CSC 452 
+ * Assignment: Phase 4a
+ * Overview: Contains the implementation of phase 4 system calls, specifically
+ * for handling sleep functionality and terminal I/O operations such as reading and writing.
+ */
 
 #include <phase1.h>
 #include <phase2.h>
@@ -12,50 +18,52 @@
 #include <stdio.h>
 
 #define FREE 0
-#define ASLEEP 1
-#define AWAKE 2
+#define SLEEPING 1
+#define READY 2
 
 // CLOCK DEVICE
-// Struct to store sleep requests
-typedef struct SleepRequest SleepRequest; 
+// Defines the structure for sleep requests
+typedef struct SleepRequest SleepRequest;
 typedef struct SleepRequest {
     int seconds;
-    int mbox; 
+    int mbox;
     int status;
     SleepRequest* next;
 };
 
-SleepRequest* sleepRequestQueue; // Queue of sleep requests
-SleepRequest sleepRequestsTable[MAXPROC]; // Table of sleep requests
+// List of sleep requests awaiting execution
+SleepRequest* sleepRequestQueue;
+// Fixed array to manage sleep request data
+SleepRequest sleepRequestsTable[MAXPROC];
 
-// Sleep request functions
+// Sleep request handler functions
 void sleep(USLOSS_Sysargs *args);
 int sleepMain(char *args);
 
 // TERMINAL DEVICE
-// arrays to store terminal information
+// Arrays to manage terminal states and buffers
 int termWriteMutex[USLOSS_TERM_UNITS];
 int termToWrite[USLOSS_TERM_UNITS];
 int termReadMbox[USLOSS_TERM_UNITS];
 int termLineIndex[USLOSS_TERM_UNITS];
 char termLines[USLOSS_TERM_UNITS][MAXLINE+1];
 
-// Terminal request functions
+// Terminal input/output system calls
 void termWrite(USLOSS_Sysargs *args);
 void termRead(USLOSS_Sysargs *args);
 int termMain(char *args);
 
 /**
- * @brief Initializes the phase 4 system calls, sleep and 
- * termRead/termWrite for clock and terminal devices.
+ * @brief Sets up the system call handlers for sleep and terminal operations, 
+ * and initializes relevant data structures for clock and terminal devices.
  */
 void phase4_init(void) {
-    // Initialize system call vector
+    // Configure the system call vector
     systemCallVec[SYS_SLEEP] = sleep;
     systemCallVec[SYS_TERMREAD]  = termRead;
     systemCallVec[SYS_TERMWRITE] = termWrite;
 
-    // Initialize sleep request table
+    // Prepare the sleep request table
     for (int i = 0; i < MAXPROC; i++) {
         sleepRequestsTable[i].status = FREE;
         sleepRequestsTable[i].next = NULL;
@@ -63,7 +71,7 @@ void phase4_init(void) {
     }
     sleepRequestQueue = NULL;
 
-    // Initialize terminal arrays
+    // Set up terminal arrays and device configurations
     memset(termLines, '\0', sizeof(termLines));
     memset(termLineIndex, 0, sizeof(termLineIndex));
     for (int i = 0; i < USLOSS_TERM_UNITS; i++) {
@@ -75,13 +83,13 @@ void phase4_init(void) {
 }
 
 /**
- * @brief Starts the deamons for phase 4 by spawning the sleepMain and termMain processes.
+ * @brief Launches daemon processes for sleep management and terminal operations.
  */
-void phase4_start_service_processes(void){
-    // Start the clock deamon
+void phase4_start_service_processes(void) {
+    // Start the sleep management process
     int sleepServicePid = spork("sleepMain", sleepMain, NULL, USLOSS_MIN_STACK, 2);
 
-    // Start the terminal deamons
+    // Start the terminal management processes
     for (int i = 0; i < USLOSS_TERM_UNITS; i++) {
         char name[128];
         sprintf(name, "termMain%d", i);
@@ -92,22 +100,21 @@ void phase4_start_service_processes(void){
 }
 
 /**
- * @brief System call for sleeping for a given number of seconds.
+ * @brief Implements the sleep system call, pausing the process for a specified duration.
  * 
- * @param args: The arguments sent to the sleep system call. 
- *              Specifically, the number of seconds to sleep.
+ * @param args: Contains the duration of sleep (in seconds) as input.
  */
 void sleep(USLOSS_Sysargs *args) {
-    // Get the number of seconds to sleep
+    // Retrieve the sleep duration
     int seconds = (long) args->arg1;
-    
-    // Check if the number of seconds is valid
+
+    // Validate the input
     if (seconds < 0) {
         args->arg4 = (void *) -1;
         return;
     }
 
-    // Find a free slot in the sleep request table
+    // Identify an available slot in the sleep table
     int sleepIndex = -1;
     for (int i = 0; i < MAXPROC; i++) {
         if (sleepRequestsTable[i].status == FREE) {
@@ -116,40 +123,40 @@ void sleep(USLOSS_Sysargs *args) {
         }
     }
 
-    // Fill the sleep request table
+    // Populate the sleep request entry
     SleepRequest* request = &sleepRequestsTable[sleepIndex];
     request->seconds = currentTime() + seconds * 1000000;
     request->mbox = MboxCreate(1, 0);
-    request->status = ASLEEP;
-    
-    // Add the request to the sleep request queue
+    request->status = SLEEPING;
+
+    // Add the entry to the sleep queue
     SleepRequest* rest = sleepRequestQueue;
-    request->next = rest; 
-    sleepRequestQueue = request; 
-    
+    request->next = rest;
+    sleepRequestQueue = request;
+
+    // Wait for the sleep to complete
     MboxRecv(request->mbox, NULL, 0);
 
     args->arg4 = (void *) 0;
 }
 
 /**
- * @brief The main function for the sleep system call. 
- * It checks the sleep request queue and wakes up the processes that are asleep
- * if their sleep time has passed.
+ * @brief Monitors the sleep queue and wakes up processes when their sleep time ends.
  * 
- * @param args: The arguments for the sleep system call.
- * @return int: 0 when the process is done.
+ * @param args: Optional arguments for the sleep management process.
+ * @return int: Always returns 0 after execution.
  */
 int sleepMain(char* args) {
     int status;
-    while(1){
+    while (1) {
+        // Wait for clock interrupt
         waitDevice(USLOSS_CLOCK_DEV, 0, &status);
+
+        // Check the sleep request queue for wake-up conditions
         SleepRequest* cur = sleepRequestQueue;
-        // Iterate through the sleep request queue
         while (cur != NULL) {
-            // Check if the process is asleep and if it is time to wake up
-            if (cur->status == ASLEEP && currentTime() > cur->seconds){
-                cur->status = AWAKE;
+            if (cur->status == SLEEPING && currentTime() > cur->seconds) {
+                cur->status = READY;
                 MboxSend(cur->mbox, NULL, 0);
             }
             cur = cur->next;
@@ -159,27 +166,54 @@ int sleepMain(char* args) {
 }
 
 /**
- * @brief System call for writing characters of a given buffer to a terminal.
- * The writing operation is done character by character, and each operation
- * is atomic.
+ * @brief Manages the terminal write operation, sending characters to a terminal device.
  * 
- * @param args: The arguments for the TermWrite system call.
+ * @param args: Includes the buffer, size of data, and terminal unit to write to.
  */
 void termWrite(USLOSS_Sysargs *args) {
-    // TODO
+    char *buffer = (char *) args->arg1;
+    int bufferSize = (int) args->arg2;
+    int unit = (int) args->arg3;
+
+    // Validate the input arguments
+    if (buffer == NULL || bufferSize <= 0 || unit < 0 || unit >= USLOSS_TERM_UNITS) {
+        args->arg4 = (void *) -1;
+        return;
+    }
+
+    // Acquire the mutex for write access
+    MboxSend(termWriteMutex[unit], NULL, 0);
+
+    for (int i = 0; i < bufferSize; i++) {
+        // Wait until the terminal is ready for output
+        MboxRecv(termToWrite[unit], NULL, 0);
+
+        int cr_val = 0x1;
+        cr_val |= 0x2;
+        cr_val |= 0x4;
+        cr_val |= (buffer[i] << 8);
+
+        USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, (void*)(long) cr_val);
+    }
+
+    args->arg4 = (void *) 0;
+    args->arg2 = (void *) bufferSize;
+
+    // Release the mutex
+    MboxRecv(termWriteMutex[unit], NULL, 0);
 }
 
 /**
- * @brief System call for reading characters from a terminal.
+ * @brief Handles reading from a terminal device and storing input in a buffer.
  * 
- * 
- * @param args: The arguments for the TermRead system call.
+ * @param args: Includes the buffer, size of the buffer, and terminal unit to read from.
  */
 void termRead(USLOSS_Sysargs *args) {
     char *buffer = (char *) args->arg1;
     int bufferSize = (int) args->arg2;
     int unit = (int) args->arg3;
 
+    // Validate input parameters
     if (buffer == NULL || bufferSize <= 0 || unit < 0 || unit >= USLOSS_TERM_UNITS) {
         args->arg4 = (void *) -1;
         return;
@@ -187,7 +221,7 @@ void termRead(USLOSS_Sysargs *args) {
 
     char line[MAXLINE+1];
 
-    // wait for a line to be read
+    // Wait for a complete line to be received
     int len = MboxRecv(termReadMbox[unit], &line, MAXLINE+1);
 
     if (len > bufferSize) {
@@ -200,27 +234,25 @@ void termRead(USLOSS_Sysargs *args) {
     args->arg2 = (void *) len;
 }
 
-
 /**
- * @brief The main function for the terminal system calls.
+ * @brief Executes terminal operations, including writing and receiving data, for a specific unit.
  * 
- * @param args: The terminal unit number as a string.
- * @return int 
+ * @param args: The terminal unit identifier provided as a string.
+ * @return int: Always returns 0 on completion.
  */
 int termMain(char *args) {
     int status;
-
     int unit = atoi(args);
 
-    while(1) {
-        // wait for terminal unit to be ready
+    while (1) {
+        // Await terminal device activity
         waitDevice(USLOSS_TERM_DEV, unit, &status);
 
         int recv = USLOSS_TERM_STAT_RECV(status);
         int xmit = USLOSS_TERM_STAT_XMIT(status);
 
-        if (xmit == USLOSS_DEV_READY ) {
-            // signal that the terminal is ready
+        if (xmit == USLOSS_DEV_READY) {
+            // Signal readiness for writing
             MboxCondSend(termToWrite[unit], NULL, 0);
         } else if (xmit == USLOSS_DEV_ERROR) {
             USLOSS_Console("USLOSS_DEV_ERROR. Halting...\n");
@@ -228,39 +260,39 @@ int termMain(char *args) {
         }
 
         if (recv == USLOSS_DEV_BUSY) {
-            // read the character
+            // Process incoming character
             char character = USLOSS_TERM_STAT_CHAR(status);
-            
+
+            // Add character to the terminal's line buffer if space allows
             if (termLineIndex[unit] < MAXLINE) {
                 termLines[unit][termLineIndex[unit]] = character;
                 termLineIndex[unit]++;
             }
-            // check if the character is a newline
+
+            // Check if the character signals the end of a line
             if (character == '\n') {
-                // send the line to the mailbox
+                // Send the completed line to the mailbox
                 MboxCondSend(termReadMbox[unit], termLines[unit], termLineIndex[unit]);
                 memset(termLines[unit], '\0', sizeof(termLines[unit]));
                 termLineIndex[unit] = 0;
             }
 
-            // check if the line is full, if so add character to new line after sending the current line
+            // Handle cases where the line buffer is full
             if (termLineIndex[unit] == MAXLINE) {
                 MboxCondSend(termReadMbox[unit], termLines[unit], termLineIndex[unit]);
                 memset(termLines[unit], '\0', sizeof(termLines[unit]));
                 termLineIndex[unit] = 0;
 
+                // Start a new line with the current character
                 termLines[unit][termLineIndex[unit]] = character;
                 termLineIndex[unit]++;
             }
 
-
-
-
         } else if (recv == USLOSS_DEV_ERROR) {
-            USLOSS_Console("An error occurred on unit %d\n", unit);
+            // Log an error and halt the system for this terminal unit
+            USLOSS_Console("An error occurred on terminal unit %d\n", unit);
             USLOSS_Halt(1);
         }
-
     }
 
     return 0;
